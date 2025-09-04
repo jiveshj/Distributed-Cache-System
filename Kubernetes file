@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cache-config
+  labels:
+    app: distributed-cache
+data:
+  cache.conf: |
+    max_memory=2GB
+    max_connections=2000
+    thread_pool_size=16
+    cleanup_interval=30
+    metrics_interval=15
+    log_level=INFO
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: distributed-cache
+  labels:
+    app: distributed-cache
+spec:
+  serviceName: cache-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: distributed-cache
+  template:
+    metadata:
+      labels:
+        app: distributed-cache
+    spec:
+      containers:
+      - name: cache-node
+        image: distributed-cache:latest
+        ports:
+        - containerPort: 7001
+          name: cache-port
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: CACHE_PORT
+          value: "7001"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: cache-data
+          mountPath: /app/data
+        livenessProbe:
+          tcpSocket:
+            port: 7001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7001
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: cache-config
+  volumeClaimTemplates:
+  - metadata:
+      name: cache-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-headless
+  labels:
+    app: distributed-cache
+spec:
+  clusterIP: None
+  selector:
+    app: distributed-cache
+  ports:
+  - port: 7001
+    targetPort: 7001
+    name: cache-port
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-service
+  labels:
+    app: distributed-cache
+spec:
+  type: LoadBalancer
+  selector:
+    app: distributed-cache
+  ports:
+  - port: 7001
+    targetPort: 7001
+    name: cache-port
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cache-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: distributed-cache
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cache-pdb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: distributed-cache
